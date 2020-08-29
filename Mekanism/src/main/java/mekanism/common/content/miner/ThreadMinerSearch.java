@@ -1,0 +1,145 @@
+package mekanism.common.content.miner;
+
+import it.unimi.dsi.fastutil.ints.Int2ObjectMap;
+import it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap;
+import it.unimi.dsi.fastutil.objects.Object2ObjectOpenHashMap;
+import java.util.BitSet;
+import java.util.List;
+import java.util.Map;
+import mekanism.api.math.MathUtils;
+import mekanism.api.text.IHasTextComponent;
+import mekanism.api.text.ILangEntry;
+import mekanism.common.MekanismLang;
+import mekanism.common.tile.TileEntityBoundingBlock;
+import mekanism.common.tile.machine.TileEntityDigitalMiner;
+import mekanism.common.util.MekanismUtils;
+import net.minecraft.block.Block;
+import net.minecraft.block.BlockState;
+import net.minecraft.block.FluidBlock;
+import net.minecraft.item.ItemStack;
+import net.minecraft.text.Text;
+import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.ChunkPos;
+import net.minecraft.world.chunk.ChunkCache;
+import net.minecraftforge.fluids.IFluidBlock;
+
+public class ThreadMinerSearch extends Thread {
+
+    private final TileEntityDigitalMiner tile;
+
+    public mekanism.common.content.miner.ThreadMinerSearch.State state = mekanism.common.content.miner.ThreadMinerSearch.State.IDLE;
+
+    private final Map<ChunkPos, BitSet> oresToMine = new Object2ObjectOpenHashMap<>();
+    private final Int2ObjectMap<MinerFilter<?>> replaceMap = new Int2ObjectOpenHashMap<>();
+    private final Map<Block, MinerFilter<?>> acceptedItems = new Object2ObjectOpenHashMap<>();
+    private ChunkCache chunkCache;
+
+    public int found = 0;
+
+    public ThreadMinerSearch(TileEntityDigitalMiner tile) {
+        this.tile = tile;
+    }
+
+    public void setChunkCache(ChunkCache cache) {
+        this.chunkCache = cache;
+    }
+
+    @Override
+    public void run() {
+        state = mekanism.common.content.miner.ThreadMinerSearch.State.SEARCHING;
+        List<MinerFilter<?>> filters = tile.getFilters();
+        if (!tile.inverse && filters.isEmpty()) {
+            state = mekanism.common.content.miner.ThreadMinerSearch.State.FINISHED;
+            return;
+        }
+        BlockPos pos = tile.getStartingPos();
+        int diameter = tile.getDiameter();
+        int size = tile.getTotalSize();
+        Block info;
+        BlockPos minerPos = tile.getPos();
+        for (int i = 0; i < size; i++) {
+            if (tile.isRemoved()) {
+                //Make sure the miner is still valid and something hasn't gone wrong
+                return;
+            }
+            BlockPos testPos = pos.add(i % diameter, i / diameter / diameter, (i / diameter) % diameter);
+            if (minerPos.equals(testPos) || MekanismUtils.getTileEntity(TileEntityBoundingBlock.class, chunkCache, testPos) != null) {
+                //Skip the miner itself, and also skip any bounding blocks
+                continue;
+            }
+            BlockState state = chunkCache.getBlockState(testPos);
+            if (state.isAir(chunkCache, testPos) || state.getHardness(chunkCache, testPos) < 0) {
+                //Skip air and unbreakable blocks
+                continue;
+            }
+            info = state.getBlock();
+            if (info instanceof FluidBlock || info instanceof IFluidBlock) {
+                //Skip liquids
+                continue;
+            }
+            MinerFilter<?> filterFound = null;
+            if (acceptedItems.containsKey(info)) {
+                filterFound = acceptedItems.get(info);
+            } else {
+                ItemStack stack = new ItemStack(info);
+                if (tile.isReplaceStack(stack)) {
+                    continue;
+                }
+                for (MinerFilter<?> filter : filters) {
+                    if (filter.canFilter(state)) {
+                        filterFound = filter;
+                        break;
+                    }
+                }
+                acceptedItems.put(info, filterFound);
+            }
+            if (tile.inverse == (filterFound == null)) {
+                set(i, testPos);
+                replaceMap.put(i, filterFound);
+                found++;
+            }
+        }
+
+        state = mekanism.common.content.miner.ThreadMinerSearch.State.FINISHED;
+        tile.oresToMine = oresToMine;
+        tile.replaceMap = replaceMap;
+        chunkCache = null;
+        tile.markDirty(false);
+        tile.cachedToMine = found;
+    }
+
+    public void set(int i, BlockPos pos) {
+        ChunkPos chunk = new ChunkPos(pos);
+        oresToMine.computeIfAbsent(chunk, k -> new BitSet());
+        oresToMine.get(chunk).set(i);
+    }
+
+    public void reset() {
+        state = mekanism.common.content.miner.ThreadMinerSearch.State.IDLE;
+        chunkCache = null;
+    }
+
+    public enum State implements IHasTextComponent {
+        IDLE(MekanismLang.MINER_IDLE),
+        SEARCHING(MekanismLang.MINER_SEARCHING),
+        PAUSED(MekanismLang.MINER_PAUSED),
+        FINISHED(MekanismLang.MINER_READY);
+
+        private static final mekanism.common.content.miner.ThreadMinerSearch.State[] MODES = values();
+
+        private final ILangEntry langEntry;
+
+        State(ILangEntry langEntry) {
+            this.langEntry = langEntry;
+        }
+
+        @Override
+        public Text getTextComponent() {
+            return langEntry.translate();
+        }
+
+        public static mekanism.common.content.miner.ThreadMinerSearch.State byIndexStatic(int index) {
+            return MathUtils.getByIndexMod(MODES, index);
+        }
+    }
+}

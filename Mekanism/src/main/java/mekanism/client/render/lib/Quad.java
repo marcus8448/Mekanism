@@ -1,0 +1,269 @@
+package mekanism.client.render.lib;
+
+import java.util.function.Consumer;
+import javax.annotation.Nonnull;
+import mekanism.common.lib.Color;
+import net.minecraft.client.render.VertexFormat;
+import net.minecraft.client.render.VertexFormatElement;
+import net.minecraft.client.render.VertexFormats;
+import net.minecraft.client.render.model.BakedQuad;
+import net.minecraft.client.texture.Sprite;
+import net.minecraft.util.math.Direction;
+import net.minecraft.util.math.Vec3d;
+import net.minecraftforge.client.model.pipeline.IVertexConsumer;
+import net.minecraftforge.client.model.pipeline.LightUtil;
+
+public class Quad {
+
+    private static final VertexFormat FORMAT = VertexFormats.POSITION_COLOR_TEXTURE_LIGHT_NORMAL;
+    private static final int SIZE = VertexFormats.POSITION_COLOR_TEXTURE_LIGHT_NORMAL.getElements().size();
+
+    private final Vertex[] vertices;
+    private Direction side;
+    private Sprite sprite;
+    private int tintIndex = -1;
+    private boolean applyDiffuseLighting;
+
+    public Quad(Sprite sprite, Direction side, Vertex[] vertices) {
+        this(sprite, side, vertices, -1, false);
+    }
+
+    public Quad(Sprite sprite, Direction side, Vertex[] vertices, int tintIndex, boolean applyDiffuseLighting) {
+        this.sprite = sprite;
+        this.side = side;
+        this.vertices = vertices;
+        this.tintIndex = tintIndex;
+        this.applyDiffuseLighting = applyDiffuseLighting;
+    }
+
+    public Quad(BakedQuad quad) {
+        vertices = new Vertex[4];
+        quad.pipe(new BakedQuadUnpacker());
+    }
+
+    public Sprite getTexture() {
+        return sprite;
+    }
+
+    public void setTexture(Sprite sprite) {
+        this.sprite = sprite;
+    }
+
+    public void vertexTransform(Consumer<Vertex> transformation) {
+        for (Vertex v : vertices) {
+            transformation.accept(v);
+        }
+    }
+
+    public Quad transform(QuadTransformation... transformations) {
+        for (QuadTransformation transform : transformations) {
+            transform.transform(this);
+        }
+        return this;
+    }
+
+    public Vertex[] getVertices() {
+        return vertices;
+    }
+
+    public void setSide(Direction side) {
+        this.side = side;
+    }
+
+    public Direction getSide() {
+        return side;
+    }
+
+    public boolean getApplyDiffuseLighting() {
+        return applyDiffuseLighting;
+    }
+
+    public void setApplyDiffuseLighting(boolean applyDiffuseLighting) {
+        this.applyDiffuseLighting = applyDiffuseLighting;
+    }
+
+    public BakedQuad bake() {
+        int[] ret = new int[FORMAT.getVertexSizeInteger() * 4];
+        for (int v = 0; v < vertices.length; v++) {
+            float[][] packed = vertices[v].pack(FORMAT);
+            for (int e = 0; e < SIZE; e++) {
+                LightUtil.pack(packed[e], ret, VertexFormats.POSITION_COLOR_TEXTURE_LIGHT_NORMAL, v, e);
+            }
+        }
+        return new BakedQuad(ret, tintIndex, side, sprite, applyDiffuseLighting);
+    }
+
+    public Quad copy() {
+        Vertex[] newVertices = new Vertex[4];
+        for (int i = 0; i < 4; i++) {
+            newVertices[i] = vertices[i].copy();
+        }
+        return new Quad(sprite, side, newVertices, tintIndex, applyDiffuseLighting);
+    }
+
+    public Quad flip() {
+        Vertex[] flipped = new Vertex[4];
+        flipped[3] = vertices[0].copy().normal(vertices[0].getNormal().multiply(-1));
+        flipped[2] = vertices[1].copy().normal(vertices[1].getNormal().multiply(-1));
+        flipped[1] = vertices[2].copy().normal(vertices[2].getNormal().multiply(-1));
+        flipped[0] = vertices[3].copy().normal(vertices[3].getNormal().multiply(-1));
+        return new Quad(sprite, side.getOpposite(), flipped, tintIndex, applyDiffuseLighting);
+    }
+
+    private class BakedQuadUnpacker implements IVertexConsumer {
+
+        private Vertex vertex = new Vertex();
+        private int vertexIndex = 0;
+
+        @Nonnull
+        @Override
+        public VertexFormat getVertexFormat() {
+            return FORMAT;
+        }
+
+        @Override
+        public void setQuadTint(int tint) {
+            tintIndex = tint;
+        }
+
+        @Override
+        public void setQuadOrientation(@Nonnull Direction orientation) {
+            side = orientation;
+        }
+
+        @Override
+        public void setApplyDiffuseLighting(boolean diffuse) {
+            applyDiffuseLighting = diffuse;
+        }
+
+        @Override
+        public void setTexture(@Nonnull Sprite texture) {
+            sprite = texture;
+        }
+
+        @Override
+        public void put(int elementIndex, float... data) {
+            VertexFormatElement element = FORMAT.getElements().get(elementIndex);
+            float f0 = data.length >= 1 ? data[0] : 0;
+            float f1 = data.length >= 2 ? data[1] : 0;
+            float f2 = data.length >= 3 ? data[2] : 0;
+            float f3 = data.length >= 4 ? data[3] : 0;
+            switch (element.getType()) {
+                case POSITION:
+                    vertex.pos(new Vec3d(f0, f1, f2));
+                    break;
+                case NORMAL:
+                    vertex.normal(new Vec3d(f0, f1, f2));
+                    break;
+                case COLOR:
+                    vertex.color(Color.rgbad(f0, f1, f2, f3));
+                    break;
+                case UV: {
+                    switch (element.getIndex()) {
+                        case 0:
+                            vertex.texRaw(f0, f1);
+                            break;
+                        case 2:
+                            vertex.lightRaw(f0, f1);
+                            break;
+                        default:
+                            break;
+                    }
+                    break;
+                }
+                default:
+                    break;
+            }
+            if (elementIndex == SIZE - 1) {
+                vertices[vertexIndex++] = vertex;
+                vertex = new Vertex();
+            }
+        }
+    }
+
+    public static class Builder {
+
+        private Sprite texture;
+        private final Direction side;
+
+        private Vec3d vec1, vec2, vec3, vec4;
+
+        private float minU, minV, maxU, maxV;
+        private float lightU, lightV;
+
+        private int tintIndex = -1;
+        private boolean applyDiffuseLighting;
+        private boolean contractUVs = true;
+
+        public Builder(Sprite texture, Direction side) {
+            this.texture = texture;
+            this.side = side;
+        }
+
+        public Builder light(float u, float v) {
+            this.lightU = u;
+            this.lightV = v;
+            return this;
+        }
+
+        public Builder uv(float minU, float minV, float maxU, float maxV) {
+            this.minU = minU;
+            this.minV = minV;
+            this.maxU = maxU;
+            this.maxV = maxV;
+            return this;
+        }
+
+        public Builder tex(Sprite texture) {
+            this.texture = texture;
+            return this;
+        }
+
+        public Builder tint(int tintIndex) {
+            this.tintIndex = tintIndex;
+            return this;
+        }
+
+        public Builder applyDiffuseLighting(boolean applyDiffuseLighting) {
+            this.applyDiffuseLighting = applyDiffuseLighting;
+            return this;
+        }
+
+        public Builder contractUVs(boolean contractUVs) {
+            this.contractUVs = contractUVs;
+            return this;
+        }
+
+        public Builder pos(Vec3d tl, Vec3d bl, Vec3d br, Vec3d tr) {
+            this.vec1 = tl;
+            this.vec2 = bl;
+            this.vec3 = br;
+            this.vec4 = tr;
+            return this;
+        }
+
+        public Builder rect(Vec3d start, double width, double height) {
+            return rect(start, width, height, 1F / 16F); // default to 1/16 scale
+        }
+
+        // start = bottom left
+        public Builder rect(Vec3d start, double width, double height, double scale) {
+            start = start.multiply(scale);
+            return pos(start.add(0, height * scale, 0), start, start.add(width * scale, 0, 0), start.add(width * scale, height * scale, 0));
+        }
+
+        public Quad build() {
+            Vertex[] vertices = new Vertex[4];
+            Vec3d normal = vec3.subtract(vec2).crossProduct(vec1.subtract(vec2)).normalize();
+            vertices[0] = Vertex.create(vec1, normal, texture, minU, minV).light(lightU, lightV);
+            vertices[1] = Vertex.create(vec2, normal, texture, minU, maxV).light(lightU, lightV);
+            vertices[2] = Vertex.create(vec3, normal, texture, maxU, maxV).light(lightU, lightV);
+            vertices[3] = Vertex.create(vec4, normal, texture, maxU, minV).light(lightU, lightV);
+            Quad quad = new Quad(texture, side, vertices, tintIndex, applyDiffuseLighting);
+            if (contractUVs) {
+                QuadUtils.contractUVs(quad);
+            }
+            return quad;
+        }
+    }
+}
